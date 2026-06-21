@@ -45,6 +45,7 @@ private:
     void initPhasePins();
     void monitorPhaseLoss();
     void simulateOxyPh();
+    static void IRAM_ATTR phaseIsrHandler(void* arg);
 
     static void adcBurstTask(void *arg);
 

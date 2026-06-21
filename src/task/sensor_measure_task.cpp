@@ -6,6 +6,15 @@
 #include "logger/loggermanager.h"
 #include <cmath>
 
+static volatile uint32_t g_last_pulse_time[3] = {0, 0, 0};
+
+void IRAM_ATTR SensorMeasureTask::phaseIsrHandler(void* arg) {
+    uint32_t phase_idx = (uint32_t)arg;
+    if (phase_idx < 3) {
+        g_last_pulse_time[phase_idx] = (uint32_t)esp_timer_get_time();
+    }
+}
+
 SensorMeasureTask::SensorMeasureTask()
     : TaskAbstract("SensorMeasureTask", 1) {}
 
@@ -212,21 +221,48 @@ void SensorMeasureTask::adcBurstTask(void *arg) {
 }
 
 void SensorMeasureTask::initPhasePins() {
-    LOG_INFO("SensorMeasureTask", "Initializing Phase loss detection pins...");
+    LOG_INFO("SensorMeasureTask", "Initializing Phase loss detection pins with interrupts...");
+    
+    // Initialize last pulse times to current time to avoid initial false alarms
+    uint32_t now = (uint32_t)esp_timer_get_time();
+    g_last_pulse_time[0] = now;
+    g_last_pulse_time[1] = now;
+    g_last_pulse_time[2] = now;
+
     gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.intr_type = GPIO_INTR_ANYEDGE; // Trigger interrupt on both rising and falling edges
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pin_bit_mask = (1ULL << PIN_GPIO_PHASE_1) | (1ULL << PIN_GPIO_PHASE_2) | (1ULL << PIN_GPIO_PHASE_3);
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io_conf);
-    LOG_INFO("SensorMeasureTask", "Phase pins (GPIO %d, %d, %d) initialized successfully.", PIN_GPIO_PHASE_1, PIN_GPIO_PHASE_2, PIN_GPIO_PHASE_3);
+
+    // Install GPIO ISR service if not already installed
+    esp_err_t err = gpio_install_isr_service(0);
+    if (err == ESP_OK) {
+        LOG_INFO("SensorMeasureTask", "GPIO ISR service installed successfully.");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        LOG_INFO("SensorMeasureTask", "GPIO ISR service already installed.");
+    } else {
+        LOG_ERROR("SensorMeasureTask", "Failed to install GPIO ISR service (0x%x)", err);
+    }
+
+    // Register ISR handlers
+    gpio_isr_handler_add((gpio_num_t)PIN_GPIO_PHASE_1, phaseIsrHandler, (void*)0);
+    gpio_isr_handler_add((gpio_num_t)PIN_GPIO_PHASE_2, phaseIsrHandler, (void*)1);
+    gpio_isr_handler_add((gpio_num_t)PIN_GPIO_PHASE_3, phaseIsrHandler, (void*)2);
+
+    LOG_INFO("SensorMeasureTask", "Phase pins (GPIO %d, %d, %d) initialized with interrupts successfully.", PIN_GPIO_PHASE_1, PIN_GPIO_PHASE_2, PIN_GPIO_PHASE_3);
 }
 
 void SensorMeasureTask::monitorPhaseLoss() {
-    bool lost1 = gpio_get_level((gpio_num_t)PIN_GPIO_PHASE_1) == 1;
-    bool lost2 = gpio_get_level((gpio_num_t)PIN_GPIO_PHASE_2) == 1;
-    bool lost3 = gpio_get_level((gpio_num_t)PIN_GPIO_PHASE_3) == 1;
+    uint32_t now = (uint32_t)esp_timer_get_time();
+    
+    // Phase is considered lost if the pin is read HIGH (1) AND the last pulse was more than 30ms (30000us) ago
+    // (If it is read LOW, it is definitely not lost. If it is read HIGH, we check the timeout to filter out zero-crossing spikes)
+    bool lost1 = (gpio_get_level((gpio_num_t)PIN_GPIO_PHASE_1) == 1) && ((now - g_last_pulse_time[0]) > 30000);
+    bool lost2 = (gpio_get_level((gpio_num_t)PIN_GPIO_PHASE_2) == 1) && ((now - g_last_pulse_time[1]) > 30000);
+    bool lost3 = (gpio_get_level((gpio_num_t)PIN_GPIO_PHASE_3) == 1) && ((now - g_last_pulse_time[2]) > 30000);
 
     gSharedData.is_lost_phase1.store(lost1, std::memory_order_relaxed);
     gSharedData.is_lost_phase2.store(lost2, std::memory_order_relaxed);
