@@ -5,6 +5,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+extern void startWatchdogTask();
+
 void timer_callback(void *arg) { 
     processTimer100Hz(); 
 }
@@ -15,6 +17,7 @@ void app_main() {
     
     // Khởi chạy các task vụ
     startAllTask();
+    startWatchdogTask(); // Bảo vệ các task khỏi taskfreezer trong libcommon.a
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     // Khởi tạo timer 1kHz (1ms) cho các phép tính toán cần thiết
